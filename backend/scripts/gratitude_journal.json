@@ -1,0 +1,29 @@
+{
+  "title": "Gratitude Journal",
+  "questions": [
+    {
+      "text": "Today, let's focus on appreciation. What is one small thing that went well recently?",
+      "max_reasks": 2
+    },
+    {
+      "text": "Who is someone you're grateful for having in your life, and why?",
+      "max_reasks": 2
+    },
+    {
+      "text": "What is a quality about yourself that you really value?",
+      "max_reasks": 3
+    },
+    {
+      "text": "What is a modern convenience or technology you're thankful for today?",
+      "max_reasks": 2
+    },
+    {
+      "text": "Think of a challenge you faced recently. What is one positive thing that came from it?",
+      "max_reasks": 2
+    },
+    {
+      "text": "What is one thing in nature that you felt grateful to experience lately?",
+      "max_reasks": 2
+    }
+  ]
+}

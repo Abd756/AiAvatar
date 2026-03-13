@@ -1,0 +1,29 @@
+{
+  "title": "Morning Reflection",
+  "questions": [
+    {
+      "text": "Good morning. How did you sleep last night?",
+      "max_reasks": 2
+    },
+    {
+      "text": "What is one thing you're looking forward to today?",
+      "max_reasks": 2
+    },
+    {
+      "text": "How would you like to feel by the end of this day?",
+      "max_reasks": 3
+    },
+    {
+      "text": "What is the most important task or intention you want to focus on?",
+      "max_reasks": 2
+    },
+    {
+      "text": "Is there anything you need to let go of from yesterday to start fresh?",
+      "max_reasks": 2
+    },
+    {
+      "text": "How can you show yourself or someone else extra kindness today?",
+      "max_reasks": 2
+    }
+  ]
+}

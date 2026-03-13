@@ -1,0 +1,366 @@
+# AI-Guided Self-Reflection Session Platform
+## System Design & Technical Specification — MVP
+
+**Prepared for:** Client  
+**Prepared by:** AsapStudio  
+**Date:** March 2026  
+**Version:** 1.0 (MVP)
+
+---
+
+## 1. Project Overview
+
+### What We're Building
+A web-based platform where an **AI avatar** guides users through structured self-reflection sessions. The avatar acts as a compassionate listener — asking pre-defined questions, listening to responses, and gently guiding the conversation forward.
+
+### Key Principles
+- **AI does NOT give advice** — it follows scripts and listens
+- **AI does NOT search the internet** — fully scripted flow
+- **Human-driven** — the user reflects, discovers, and gains personal insight
+- **Safe space** — no judgment, no labeling, no diagnosis
+- **Not therapy** — but uses therapeutic process design
+
+### MVP Scope (This Phase)
+- ✅ One pre-defined question script (5–6 questions)
+- ✅ AI avatar asks questions and listens to responses
+- ✅ Re-ask logic if user's response is unclear or off-topic
+- ✅ Full session transcript stored in database
+- ✅ Doctor can view completed session transcripts
+- ✅ Target latency: **< 1.5 seconds** response time
+
+---
+
+## 2. System Architecture
+
+### High-Level Flow
+
+```mermaid
+graph LR
+    subgraph "User's Browser"
+        A["User with Mic 🎤"] --> B[WebRTC Connection]
+        B --> C["Avatar Video Display 👤"]
+    end
+
+    subgraph "Real-Time Pipeline Server"
+        B <-->|WebRTC| D[Pipecat Pipeline]
+        D --> E[Deepgram STT]
+        E --> F[LLM Brain]
+        F --> G[Cartesia TTS]
+        G --> H[Simli Avatar]
+        H --> D
+    end
+
+    subgraph "Backend Server"
+        F <--> I[FastAPI]
+        I --> J[(MongoDB)]
+    end
+
+    subgraph "Doctor Access"
+        J --> K["Doctor Dashboard 🩺"]
+    end
+```
+
+### How a Session Works (Step by Step)
+
+```mermaid
+sequenceDiagram
+    participant User as User (Browser)
+    participant Avatar as Simli Avatar
+    participant STT as Deepgram (Ears)
+    participant LLM as GPT-4o-mini (Brain)
+    participant TTS as Cartesia (Voice)
+    participant DB as MongoDB
+
+    Note over User,DB: Session Starts
+    LLM->>TTS: "Hello! How are you feeling right now?"
+    TTS->>Avatar: Speech audio
+    Avatar->>User: Avatar speaks with lip-sync
+
+    User->>STT: Speaks response
+    STT->>LLM: "I've been stressed about work"
+    LLM->>DB: Save Q&A exchange
+    
+    Note over LLM: Decides: ACKNOWLEDGE + NEXT QUESTION
+    LLM->>TTS: "Thank you for sharing. What has been weighing on you?"
+    TTS->>Avatar: Speech audio
+    Avatar->>User: Avatar responds naturally
+
+    Note over User,DB: Loop continues through all questions
+    
+    Note over LLM: All questions complete
+    LLM->>TTS: "Thank you for this session. Take care."
+    LLM->>DB: Finalize session
+```
+
+---
+
+## 3. Technology Stack
+
+| Component | Technology | Why This Choice |
+|-----------|-----------|-----------------|
+| **Real-time Pipeline** | **Pipecat** (Python) | Open-source framework for real-time voice AI bots. Handles audio/video streaming, turn-taking, and all service integrations out of the box |
+| **Avatar** | **Simli** | Converts speech audio → lip-synced avatar video in real-time |
+| **Speech-to-Text** | **Deepgram** (Nova-3) | Industry-leading streaming STT with ~200ms latency |
+| **Text-to-Speech** | **Cartesia** (Sonic) | Ultra-low latency TTS (~200ms), natural-sounding voices |
+| **LLM (Brain)** | **GPT-4o-mini** via LangChain | Fast, cost-effective, follows scripted instructions accurately |
+| **Backend API** | **FastAPI** (Python) | REST API for session management, doctor dashboard |
+| **Database** | **MongoDB** | Flexible document storage for sessions, messages, and Q&A |
+| **Transport** | **WebRTC** | Real-time audio/video streaming between browser and server |
+| **Voice Detection** | **Silero VAD** (built-in to Pipecat) | Detects when user starts/stops speaking for natural turn-taking |
+
+### What is Pipecat?
+
+Pipecat is an **open-source Python framework** for building real-time voice and video AI agents. Instead of manually wiring together STT → LLM → TTS → Avatar (which takes weeks), Pipecat provides a **pipeline** where data flows through each stage automatically and in parallel:
+
+```python
+pipeline = Pipeline([
+    transport.input(),         # Captures user's mic audio
+    stt,                       # Deepgram: audio → text (streaming)
+    llm,                       # GPT-4o-mini: decides response (streaming)
+    tts,                       # Cartesia: text → speech audio (streaming)
+    simli_avatar,              # Simli: audio → lip-synced video
+    transport.output(),        # Sends video + audio back to browser
+])
+```
+
+**Key benefit:** Everything streams in parallel — while the LLM is generating words, the TTS is already converting earlier words to speech, and Simli is already rendering video. This is how we achieve **< 1.5 second response time**.
+
+---
+
+## 4. Cloud API Costs
+
+### Cost Breakdown Per Service
+
+| Service | What It Does | Free Tier / Trial | Pay-As-You-Go Cost |
+|---------|-------------|-------------------|-------------------|
+| **Simli** | Avatar video rendering | **120 free minutes** + $10 credit on signup | **$0.05 / minute** |
+| **Deepgram** | Speech-to-Text (ears) | **$200 free credit** (~433 hours of audio) | **$0.0077 / minute** (Nova-3) |
+| **Cartesia** | Text-to-Speech (voice) | **10,000–20,000 free characters** | **~$0.05 / 1,000 characters** |
+| **OpenAI GPT-4o-mini** | LLM Brain (intelligence) | Standard API access (pay-per-use) | **$0.15 / 1M input tokens, $0.60 / 1M output tokens** |
+| **MongoDB Atlas** | Database | **Free cluster** (512 MB storage) | **$0.00 for MVP** |
+
+### Alternative LLM Options
+
+| LLM Model | Input Cost (per 1M tokens) | Output Cost (per 1M tokens) | Free Tier | Notes |
+|-----------|---------------------------|----------------------------|-----------|-------|
+| **GPT-4o-mini** ✅ | $0.15 | $0.60 | No | Fast, cheap, accurate for scripted tasks |
+| GPT-4o | $2.50 | $10.00 | No | Higher accuracy, 17× more expensive |
+| **Gemini 2.5 Flash** | $0.30 | $2.50 | ✅ Yes (daily quota) | Google alternative, free tier available |
+| GPT-5 Nano | $0.05 | $0.40 | No | Cheapest OpenAI option |
+
+### Alternative TTS Options
+
+| TTS Service | Free Tier | Cost per 1K Characters | Latency | Quality |
+|-------------|-----------|----------------------|---------|---------|
+| **Cartesia** ✅ | 10K–20K free chars | ~$0.05 | **~200ms** | Good |
+| ElevenLabs | 10K chars/month | $0.24–0.30 | ~300ms | Excellent |
+| Deepgram Aura | Part of $200 credit | $0.03 | ~250ms | Good |
+
+---
+
+### 💰 Estimated Cost Per Session
+
+> **Scenario:** A 10-minute session with 6 Q&A exchanges
+
+| Service | Calculation | Cost |
+|---------|-------------|------|
+| Simli (avatar) | 10 min × $0.05/min | **$0.50** |
+| Deepgram (STT) | 10 min × $0.0077/min | **$0.08** |
+| Cartesia (TTS) | ~2,000 characters × $0.05/1K | **$0.10** |
+| GPT-4o-mini | ~3K input + ~1K output tokens | **< $0.01** |
+| MongoDB | Free tier | **$0.00** |
+| **Total per 10-min session** | | **~$0.68** |
+
+> **For a 20-minute session:** ~$1.30  
+> **For a 5-minute session:** ~$0.35
+
+### Free Tier Capacity for Demo/Testing
+
+| Service | Free Allowance | How Many 10-min Sessions |
+|---------|---------------|--------------------------|
+| Simli | 120 minutes | **~12 sessions** |
+| Deepgram | $200 credit (~433 hours) | **~2,598 sessions** |
+| Cartesia | 10K–20K characters | **~5–10 sessions** |
+| **Limiting factor** | **Cartesia / Simli** | **~5–10 free demo sessions** |
+
+---
+
+## 5. Session Logic
+
+### LLM Decision Engine
+
+For each user response, the LLM decides **one action**:
+
+| Action | When | Avatar Response Example |
+|--------|------|------------------------|
+| **NEXT** | Clear, relevant response | "Thank you. Now, what has been on your mind today?" |
+| **REASK** | Unclear, too brief, off-topic | "That's okay. Take your time — how would you describe what you're feeling?" |
+| **ACKNOWLEDGE** | Emotional or vulnerable response | "Thank you for sharing that. It takes courage." → then next question |
+| **CLOSE** | All questions completed | "Thank you for this session. I hope it was a moment of reflection." |
+
+### LLM Rules (Strictly Enforced)
+
+| ✅ ALWAYS | ❌ NEVER |
+|-----------|---------|
+| Follow the script sequence | Give advice or opinions |
+| Keep responses short (1–2 sentences) | Search the internet |
+| Acknowledge the user warmly | Diagnose or label feelings |
+| Be gentle when re-asking | Provide solutions or suggestions |
+| Stay on topic | Reference external information |
+
+### Pre-defined Script Example
+
+```json
+{
+  "script_name": "Daily Check-In",
+  "questions": [
+    {"order": 1, "text": "How are you feeling right now, in this moment?", "category": "opening"},
+    {"order": 2, "text": "What has been occupying your thoughts today?", "category": "exploration"},
+    {"order": 3, "text": "When you think about that, what emotion comes up for you?", "category": "deep_reflection"},
+    {"order": 4, "text": "Have you experienced this feeling before? When was that?", "category": "deep_reflection"},
+    {"order": 5, "text": "What would you say to a friend going through the same thing?", "category": "perspective"},
+    {"order": 6, "text": "As we wrap up, what is one thing you would like to carry forward?", "category": "closing"}
+  ]
+}
+```
+
+---
+
+## 6. Database Design (MongoDB)
+
+### `sessions` — One document per session
+```json
+{
+  "_id": "session_abc123",
+  "patient_name": "John Doe",
+  "script_name": "Daily Check-In",
+  "status": "completed",
+  "started_at": "2026-03-07T10:00:00Z",
+  "ended_at": "2026-03-07T10:12:30Z",
+  "duration_seconds": 750,
+  "total_questions": 6,
+  "total_reasks": 1
+}
+```
+
+### `messages` — Every message between avatar and user
+```json
+{
+  "_id": "msg_001",
+  "session_id": "session_abc123",
+  "role": "avatar",
+  "content": "How are you feeling right now, in this moment?",
+  "question_index": 1,
+  "llm_action": null,
+  "timestamp": "2026-03-07T10:00:05Z"
+}
+```
+```json
+{
+  "_id": "msg_002",
+  "session_id": "session_abc123",
+  "role": "user",
+  "content": "I have been feeling stressed about work lately",
+  "question_index": 1,
+  "llm_action": "ACKNOWLEDGE",
+  "timestamp": "2026-03-07T10:00:35Z"
+}
+```
+
+### `scripts` — Pre-defined question sets
+```json
+{
+  "_id": "script_daily_checkin",
+  "name": "Daily Check-In",
+  "questions": [
+    {"order": 1, "text": "How are you feeling right now?", "max_reasks": 2},
+    {"order": 2, "text": "What has been on your mind?", "max_reasks": 2}
+  ],
+  "is_active": true
+}
+```
+
+---
+
+## 7. Latency Analysis
+
+### How We Achieve < 1.5 Second Response Time
+
+Each stage processes data **in parallel** (streaming), not sequentially:
+
+```
+Sequential (slow):
+[===STT 300ms===] → [===LLM 800ms===] → [===TTS 500ms===] → [===Simli 300ms===]
+Total: ~1.9 seconds ❌
+
+Pipelined/Streaming (our approach):
+[===STT 300ms===]
+       [===LLM streaming===]
+            [===TTS streaming===]
+                 [===Simli streaming===]
+Total perceived: ~1.0–1.4 seconds ✅
+```
+
+| Stage | Latency |
+|-------|---------|
+| Voice Activity Detection (Silero) | ~100ms |
+| Deepgram STT (streaming) | ~200–300ms |
+| GPT-4o-mini (streaming) | ~200–400ms |
+| Cartesia TTS (streaming) | ~200ms |
+| Simli avatar rendering | ~100–200ms |
+| **Total (pipelined)** | **~1.0–1.4 seconds** |
+
+---
+
+## 8. Project Structure
+
+```
+AiAvatar/
+├── backend/
+│   ├── app/
+│   │   ├── main.py                    # FastAPI entry point
+│   │   ├── config.py                  # Environment variables
+│   │   ├── database.py                # MongoDB connection
+│   │   ├── routers/
+│   │   │   ├── sessions.py            # Session start/end/list APIs
+│   │   │   └── doctor.py              # Doctor transcript view API
+│   │   └── services/
+│   │       ├── session_controller.py  # LangChain session brain
+│   │       └── script_manager.py      # Load question scripts
+│   ├── pipeline/
+│   │   ├── bot.py                     # Pipecat pipeline definition
+│   │   └── session_processor.py       # Custom processor (LangChain bridge)
+│   ├── scripts/                       # JSON question scripts
+│   ├── requirements.txt
+│   └── .env
+├── frontend/                          # Session page + Doctor view
+└── docker-compose.yml
+```
+
+---
+
+## 9. MVP Timeline Estimate
+
+| Phase | Duration | Deliverable |
+|-------|----------|-------------|
+| Setup & Integration | 3–4 days | Pipecat pipeline + Simli + Deepgram + Cartesia working |
+| Session Logic | 2–3 days | LangChain brain with script follow, reask, acknowledge |
+| Backend API + Database | 2 days | FastAPI + MongoDB, session/message storage |
+| Frontend | 2–3 days | Session page with avatar + doctor review page |
+| Testing & Polish | 2 days | End-to-end testing, latency optimization |
+| **Total** | **~11–14 days** | **Fully working MVP demo** |
+
+---
+
+## 10. Future Phases (Post-MVP)
+
+| Feature | Phase |
+|---------|-------|
+| Multiple scripts (different session types) | Phase 2 |
+| Sentiment analysis & emotion tracking | Phase 2 |
+| Patient management & authentication | Phase 2 |
+| Advanced doctor analytics dashboard | Phase 2 |
+| Session scheduling & reminders | Phase 3 |
+| Multi-doctor/clinic support | Phase 3 |
+| Mobile-responsive design | Phase 3 |
+| Distress detection & safety alerts | Phase 3 |

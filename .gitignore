@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.env
+.env.local
+.python-version
+
+# Node.js
+node_modules/
+.next/
+out/
+build/
+dist/
+.npm
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Firebase/Google Cloud
+firebase_service_key.json
+.firebaserc
+firebase-debug.log*
+firestore-debug.log*
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project Specific
+testing/test_session_*
+testing/abdullah_test_session_*
+backend/.env
+frontend/.env
+frontend/.env.local

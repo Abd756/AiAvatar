@@ -1,0 +1,29 @@
+{
+  "title": "Daily Check-In",
+  "questions": [
+    {
+      "text": "How are you feeling right now, in this moment?",
+      "max_reasks": 2
+    },
+    {
+      "text": "What's one thing that's been on your mind lately?",
+      "max_reasks": 2
+    },
+    {
+      "text": "How have your energy levels been throughout the day?",
+      "max_reasks": 2
+    },
+    {
+      "text": "Did you encounter any challenges that you'd like to reflect on?",
+      "max_reasks": 2
+    },
+    {
+      "text": "What is something you're proud of accomplishing today, no matter how small?",
+      "max_reasks": 2
+    },
+    {
+      "text": "Before we finish, is there anything else you'd like to share about your day?",
+      "max_reasks": 3
+    }
+  ]
+}

@@ -1,0 +1,583 @@
+# AI-Guided Self-Reflection Session Platform — System Architecture
+
+## 1. Executive Summary
+
+An AI-guided self-reflection platform where a **Simli avatar** acts as a compassionate listener, guiding users through structured question scripts. The AI **never gives advice or opinions** — it follows pre-defined scripts, analyzes user sentiment, and manages the session flow. All session data is stored for doctor/clinician review.
+
+---
+
+## 2. Core Architecture Overview
+
+```mermaid
+graph TB
+    subgraph "Frontend — Next.js / React"
+        U[User with Microphone] -->|Audio Stream| WR[WebRTC Transport]
+        WR -->|Avatar Video + Audio| AV[Simli Avatar Display]
+        AV --> U
+        UI[Session UI] --> SS[Session Status Panel]
+    end
+
+    subgraph "Real-Time Pipeline — Pipecat Server"
+        WR <-->|WebRTC| PC[Pipecat Pipeline]
+        PC --> STT[Deepgram STT<br/>Real-time Streaming]
+        STT --> CA[Context Aggregator]
+        CA --> LLM[LLM Brain<br/>via LangChain]
+        LLM --> TTS[ElevenLabs / Cartesia TTS]
+        TTS --> SIM[Simli Video Service]
+        SIM --> PC
+    end
+
+    subgraph "Backend — FastAPI"
+        LLM <-->|REST/WebSocket| API[FastAPI Server]
+        API --> SM[Script Manager]
+        API --> SA[Sentiment Analyzer]
+        API --> SH[Session Handler]
+        SH --> DB[(PostgreSQL)]
+    end
+
+    subgraph "Doctor Dashboard"
+        DB --> DD[Doctor Portal<br/>Session Transcripts & Analytics]
+    end
+```
+
+---
+
+## 3. Why Pipecat + Simli (Recommended Architecture)
+
+After studying the Simli documentation, there are **three integration paths**:
+
+| Approach | Pros | Cons | Latency |
+|----------|------|------|---------|
+| **Pipecat + Simli** ✅ | Complete pipeline (STT→LLM→TTS→Avatar), built-in VAD, real-time WebRTC transport, Python-native | Requires Pipecat server hosting | **~500ms - 1.5s** |
+| LiveKit + Simli | Managed infrastructure, scalable | Extra dependency, less control over LLM pipeline | ~1-2s |
+| JS SDK + Custom Backend | Full control | Must build entire pipeline manually, harder to get low latency | ~2-4s |
+
+### Why Pipecat Wins for This Project
+
+1. **Ultra-low latency** — Pipecat streams audio/video frame-by-frame through the pipeline, no waiting for full responses
+2. **Built-in VAD (Voice Activity Detection)** — Silero VAD detects when the user starts/stops speaking, enabling natural turn-taking
+3. **Python-native** — Your backend is FastAPI + LangChain, both Python. Pipecat is Python too — perfect integration
+4. **Simli is a first-class Pipecat plugin** — `pipecat-ai[simli]` ships ready to use
+5. **Web-native delivery** — WebRTC transport means the avatar + audio streams directly to the browser with minimal latency
+
+> [!IMPORTANT]
+> **Simli does NOT provide TTS.** Simli converts audio → lip-synced avatar video. You need a separate TTS service (ElevenLabs or Cartesia recommended) to generate the speech audio that Simli then lip-syncs to.
+
+---
+
+## 4. Detailed Component Design
+
+### 4.1 Real-Time Pipeline (Pipecat)
+
+This is the **heart** of the system. The Pipecat pipeline processes data frame-by-frame in real-time:
+
+```
+User Mic → WebRTC → [Silero VAD] → [Deepgram STT] → [Context Aggregator] 
+    → [LangChain LLM] → [ElevenLabs TTS] → [Simli Avatar Video] → WebRTC → User Browser
+```
+
+**Key Pipeline Components:**
+
+| Component | Service | Role |
+|-----------|---------|------|
+| **VAD** | Silero | Detects speech start/end, prevents interruptions |
+| **STT** | Deepgram (streaming) | Real-time speech-to-text with interim results |
+| **LLM** | OpenAI GPT-4o via LangChain | Session brain — decides next action based on script + history |
+| **TTS** | ElevenLabs or Cartesia | Converts LLM text response to natural speech audio |
+| **Avatar** | Simli `SimliVideoService` | Converts speech audio to lip-synced avatar video |
+| **Transport** | WebRTC (Daily/native) | Bi-directional audio/video streaming |
+
+**Latency Breakdown (Target < 1.5s total):**
+
+| Stage | Expected Latency |
+|-------|-----------------|
+| VAD detection | ~100ms |
+| Deepgram STT (streaming) | ~200-300ms |
+| LLM response (streaming) | ~300-500ms |
+| TTS (streaming) | ~200-300ms |
+| Simli avatar rendering | ~100-200ms |
+| **Total** | **~900ms - 1.4s** |
+
+### 4.2 LLM Brain (LangChain — Custom Processor)
+
+The LLM is constrained to a very specific role. It does NOT freelance, search, or give advice.
+
+#### System Prompt Architecture
+
+```python
+SYSTEM_PROMPT = """
+You are a session guide for a structured self-reflection process. 
+Your ONLY role is to follow the provided script and listen.
+
+RULES (NEVER BREAK):
+1. NEVER give advice, opinions, or suggestions
+2. NEVER search for external information  
+3. NEVER diagnose or label the user's feelings
+4. ALWAYS follow the script sequence unless a re-ask is needed
+5. Acknowledge the user's response warmly before moving on
+6. Keep responses SHORT (1-2 sentences max)
+
+CURRENT SCRIPT: {current_script}
+CURRENT QUESTION INDEX: {question_index}
+QUESTIONS: {questions_json}
+
+SESSION HISTORY:
+{session_history}
+
+USER'S LATEST RESPONSE: {user_response}
+
+Based on the user's response, decide ONE action:
+- "NEXT": Move to the next question (response was relevant and complete)
+- "REASK": Gently re-ask the same question (response was unclear, off-topic, or too brief)  
+- "ACKNOWLEDGE": Validate their feelings, then move to next question
+- "CLOSE": End the session gracefully (all questions completed)
+
+Respond with:
+1. A brief, warm acknowledgment of what they said (if applicable)
+2. The next question OR a gentle re-phrasing of the current question
+"""
+```
+
+#### Decision Logic (Custom LangChain Processor)
+
+```python
+class SessionController:
+    """Integrates with Pipecat as a custom LLM processor"""
+    
+    def __init__(self, script_id: str, session_id: str):
+        self.script = load_script(script_id)
+        self.current_question_idx = 0
+        self.session_history = []
+        self.llm_chain = build_langchain_chain()  # LangChain LCEL chain
+    
+    async def process_user_input(self, transcript: str) -> str:
+        """Called by Pipecat when STT produces a final transcript"""
+        
+        # 1. Add to history
+        self.session_history.append({
+            "role": "user", 
+            "content": transcript,
+            "question_idx": self.current_question_idx,
+            "timestamp": now()
+        })
+        
+        # 2. Ask LLM for decision + response
+        result = await self.llm_chain.ainvoke({
+            "current_script": self.script.name,
+            "question_index": self.current_question_idx,
+            "questions_json": json.dumps(self.script.questions),
+            "session_history": format_history(self.session_history),
+            "user_response": transcript
+        })
+        
+        # 3. Parse action and update state
+        action = parse_action(result)  # NEXT / REASK / ACKNOWLEDGE / CLOSE
+        
+        if action in ("NEXT", "ACKNOWLEDGE"):
+            self.current_question_idx += 1
+            
+        # 4. Persist to database
+        await save_exchange(self.session_id, transcript, result, action)
+        
+        # 5. Return text for TTS → Simli
+        return result.response_text
+```
+
+### 4.3 Backend API (FastAPI)
+
+The FastAPI server handles everything **outside** the real-time pipeline:
+
+#### Key Endpoints
+
+```
+POST   /api/sessions/start          → Start a new session (returns session_id, Pipecat room URL)
+POST   /api/sessions/{id}/end       → End session, finalize transcript
+GET    /api/sessions/{id}           → Get session details + transcript
+GET    /api/sessions/{id}/analytics → Get sentiment timeline, completion stats
+
+POST   /api/scripts                 → Create/update script (admin/doctor)
+GET    /api/scripts                 → List available scripts
+GET    /api/scripts/{id}            → Get script with questions
+
+GET    /api/doctor/sessions         → Doctor dashboard — list all sessions
+GET    /api/doctor/sessions/{id}    → Full session detail with Q&A + sentiment
+GET    /api/doctor/patients         → List patients with session history
+```
+
+### 4.4 Script Management System
+
+Scripts are pre-defined question sequences stored in the database:
+
+```python
+# Database Model
+class Script(Base):
+    __tablename__ = "scripts"
+    id = Column(UUID, primary_key=True)
+    name = Column(String, nullable=False)          # "Stress Awareness Session"
+    description = Column(Text)
+    category = Column(String)                       # "stress", "anxiety", "general"
+    estimated_duration_minutes = Column(Integer)
+    created_by = Column(UUID, ForeignKey("doctors.id"))
+    is_active = Column(Boolean, default=True)
+
+class ScriptQuestion(Base):
+    __tablename__ = "script_questions"
+    id = Column(UUID, primary_key=True)
+    script_id = Column(UUID, ForeignKey("scripts.id"))
+    order_index = Column(Integer, nullable=False)
+    question_text = Column(Text, nullable=False)    # "What's been on your mind lately?"
+    category = Column(String)                        # "opening", "deep", "closing"
+    max_reasks = Column(Integer, default=2)          # Max times to re-ask
+    follow_up_hint = Column(Text)                    # Context for LLM on re-ask
+```
+
+**Example Script:**
+```json
+{
+  "name": "Daily Check-In",
+  "questions": [
+    {"order": 1, "text": "How are you feeling right now, in this moment?", "category": "opening"},
+    {"order": 2, "text": "What's been occupying your thoughts today?", "category": "exploration"},
+    {"order": 3, "text": "When you think about that, what emotion comes up for you?", "category": "deep"},
+    {"order": 4, "text": "Have you experienced this feeling before? When?", "category": "deep"},
+    {"order": 5, "text": "What would you say to a friend going through the same thing?", "category": "reflection"},
+    {"order": 6, "text": "As we wrap up, what's one thing you'd like to carry forward from today?", "category": "closing"}
+  ]
+}
+```
+
+### 4.5 Sentiment Analysis
+
+Runs **alongside** the conversation, not blocking it:
+
+```python
+class SentimentAnalyzer:
+    """Async sentiment analysis — runs in parallel, doesn't block pipeline"""
+    
+    async def analyze(self, text: str, session_id: str) -> SentimentResult:
+        # Use a lightweight model or API call
+        result = await self.model.analyze(text)
+        
+        # Store for doctor dashboard
+        await save_sentiment(session_id, SentimentResult(
+            text=text,
+            sentiment=result.label,       # positive/negative/neutral
+            confidence=result.score,
+            emotions=result.emotions,     # joy, sadness, anger, fear, etc.
+            timestamp=now()
+        ))
+        
+        # Flag if distress detected → for doctor alert
+        if result.distress_level > THRESHOLD:
+            await flag_session(session_id, reason="distress_detected")
+        
+        return result
+```
+
+### 4.6 Database Schema
+
+```mermaid
+erDiagram
+    DOCTORS ||--o{ SCRIPTS : creates
+    DOCTORS ||--o{ SESSIONS : reviews
+    SCRIPTS ||--o{ SCRIPT_QUESTIONS : contains
+    SCRIPTS ||--o{ SESSIONS : uses
+    SESSIONS ||--o{ SESSION_EXCHANGES : contains
+    SESSIONS ||--o{ SENTIMENT_RECORDS : tracks
+    PATIENTS ||--o{ SESSIONS : participates
+
+    PATIENTS {
+        uuid id PK
+        string name
+        string email
+        string identifier
+        timestamp created_at
+    }
+
+    DOCTORS {
+        uuid id PK
+        string name
+        string email
+        string specialty
+    }
+
+    SCRIPTS {
+        uuid id PK
+        string name
+        text description
+        string category
+        int estimated_duration
+        uuid created_by FK
+        boolean is_active
+    }
+
+    SCRIPT_QUESTIONS {
+        uuid id PK
+        uuid script_id FK
+        int order_index
+        text question_text
+        string category
+        int max_reasks
+        text follow_up_hint
+    }
+
+    SESSIONS {
+        uuid id PK
+        uuid patient_id FK
+        uuid script_id FK
+        uuid doctor_id FK
+        timestamp started_at
+        timestamp ended_at
+        string status
+        jsonb metadata
+    }
+
+    SESSION_EXCHANGES {
+        uuid id PK
+        uuid session_id FK
+        int question_index
+        text question_asked
+        text user_response
+        string llm_action
+        text llm_response
+        timestamp timestamp
+    }
+
+    SENTIMENT_RECORDS {
+        uuid id PK
+        uuid session_id FK
+        uuid exchange_id FK
+        string sentiment
+        float confidence
+        jsonb emotions
+        boolean distress_flagged
+        timestamp timestamp
+    }
+```
+
+### 4.7 Frontend Architecture
+
+```
+frontend/
+├── app/
+│   ├── page.tsx                    # Landing / session start
+│   ├── session/[id]/page.tsx       # Active session with avatar
+│   └── doctor/
+│       ├── page.tsx                # Doctor dashboard
+│       └── session/[id]/page.tsx   # Session review
+├── components/
+│   ├── SimliAvatar.tsx             # Simli WebRTC avatar component
+│   ├── SessionControls.tsx         # Start/pause/end controls
+│   ├── SessionTimer.tsx            # Duration tracking
+│   └── TranscriptPanel.tsx         # Live transcript (optional)
+└── lib/
+    ├── pipecat-client.ts           # Pipecat WebRTC client setup
+    └── api.ts                      # FastAPI client
+```
+
+**Session Page Flow:**
+1. User clicks "Start Session" → Frontend calls `POST /api/sessions/start`
+2. Backend creates session, spins up Pipecat pipeline, returns WebRTC room URL
+3. Frontend connects to the Pipecat WebRTC transport (Daily or native WebRTC)
+4. Simli avatar video + TTS audio stream to the browser
+5. User's microphone audio streams to Pipecat → STT → LLM → TTS → Simli → back to browser
+6. On "End Session" → Frontend calls `POST /api/sessions/{id}/end`, pipeline shuts down
+
+---
+
+## 5. Real-Time Session Flow (Detailed)
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant F as Frontend
+    participant PC as Pipecat Pipeline
+    participant STT as Deepgram STT
+    participant LLM as LangChain LLM
+    participant TTS as ElevenLabs TTS
+    participant SIM as Simli Avatar
+    participant API as FastAPI
+    participant DB as PostgreSQL
+
+    U->>F: Click "Start Session"
+    F->>API: POST /sessions/start {script_id, patient_id}
+    API->>DB: Create session record
+    API->>PC: Spin up Pipecat pipeline
+    PC-->>F: WebRTC room URL
+    F->>PC: Connect WebRTC (audio+video)
+    
+    Note over PC,SIM: Avatar greets user with first question
+    LLM->>TTS: "Hello! How are you feeling right now?"
+    TTS->>SIM: Speech audio stream
+    SIM->>PC: Lip-synced avatar video
+    PC->>F: Avatar video + audio
+    F->>U: Avatar speaks the question
+
+    Note over U,PC: User responds
+    U->>F: Speaks into microphone
+    F->>PC: Audio stream (WebRTC)
+    PC->>STT: Audio chunks (streaming)
+    STT-->>PC: Interim transcripts
+    STT->>PC: Final transcript: "I've been feeling stressed about work"
+    
+    PC->>LLM: {question, response, history}
+    PC->>API: Save exchange + run sentiment
+    API->>DB: Store Q&A exchange
+    
+    LLM->>PC: Action: ACKNOWLEDGE + "Thank you for sharing that..."
+    LLM->>TTS: "Thank you for sharing that. What specifically about work has been weighing on you?"
+    TTS->>SIM: Audio stream
+    SIM->>PC: Avatar video
+    PC->>F: Stream to browser
+    F->>U: Avatar responds naturally
+
+    Note over U,DB: Loop continues until script complete
+    
+    U->>F: Click "End Session"
+    F->>API: POST /sessions/{id}/end
+    API->>DB: Finalize session
+    API->>PC: Shutdown pipeline
+```
+
+---
+
+## 6. Key Design Decisions & Answers to Your Questions
+
+### Q: Does Simli provide TTS?
+**No.** Simli is an **audio-to-avatar-video** service. You send it speech audio (PCM16, 16kHz), and it returns a lip-synced avatar video stream. You need a separate TTS service:
+- **ElevenLabs** — Best voice quality, higher cost
+- **Cartesia** — Lower latency, good quality, lower cost (recommended for MVP)
+
+### Q: How to achieve real-time feel with low delay?
+The **Pipecat streaming pipeline** is the answer:
+1. **Streaming STT** — Deepgram provides interim results as the user speaks
+2. **Streaming LLM** — GPT-4o streams tokens as they're generated
+3. **Streaming TTS** — ElevenLabs/Cartesia start generating audio from the first tokens
+4. **Streaming Avatar** — Simli starts rendering video from the first audio chunks
+5. Everything is **pipelined** — each stage starts processing before the previous stage finishes
+
+### Q: How to handle the real-time session between avatar and user?
+**WebRTC transport** via Pipecat handles this:
+- User's browser establishes a WebRTC connection to the Pipecat server
+- Audio flows bidirectionally in real-time (~50ms transport latency)
+- Avatar video streams back the same way
+- Silero VAD handles turn-taking (detects when user starts/stops speaking)
+
+### Q: Should I use LangChain?
+**Yes, but strategically.** Use LangChain for:
+- Building the prompt chain (LCEL — LangChain Expression Language)
+- Managing conversation memory/history
+- Structured output parsing (action decisions)
+
+**Don't** use LangChain for the real-time audio pipeline — that's Pipecat's job. Integrate LangChain as a **custom processor** within the Pipecat pipeline.
+
+---
+
+## 7. Technology Stack Summary
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Frontend** | Next.js + React | Session UI + Doctor Dashboard |
+| **Avatar** | Simli (via Pipecat plugin) | Lip-synced talking avatar |
+| **Real-time Pipeline** | Pipecat | Frame-by-frame audio/video processing |
+| **Transport** | WebRTC (Daily or native) | Real-time browser ↔ server communication |
+| **STT** | Deepgram (streaming) | Real-time speech-to-text |
+| **TTS** | ElevenLabs or Cartesia | Text-to-speech for avatar |
+| **LLM** | GPT-4o via LangChain | Session brain — script following + sentiment |
+| **VAD** | Silero (Pipecat built-in) | Voice activity detection for turn-taking |
+| **Backend API** | FastAPI (Python) | REST API for sessions, scripts, doctor dashboard |
+| **Database** | PostgreSQL | Session data, scripts, transcripts, sentiment |
+| **ORM** | SQLAlchemy + Alembic | Database models + migrations |
+| **Sentiment** | Custom (via LLM or lightweight model) | Emotion tracking per exchange |
+
+---
+
+## 8. MVP Scope (Phase 1)
+
+For the prototype/demo, focus on:
+
+- [x] **1 hardcoded script** with 5-6 questions
+- [x] **Pipecat pipeline** with Deepgram STT + GPT-4o + Cartesia TTS + Simli avatar
+- [x] **Basic session flow** — start session → avatar asks questions → user responds → avatar acknowledges → next question
+- [x] **REASK logic** — if user response is unclear, gently re-ask
+- [x] **Session storage** — save all Q&A exchanges to PostgreSQL
+- [x] **Simple frontend** — session page with avatar, start/end buttons
+- [x] **Basic doctor view** — read-only page showing session transcript
+
+**Deferred to Phase 2:**
+- Multiple scripts management UI
+- Advanced sentiment analytics dashboard
+- Patient management
+- Session scheduling
+- Multi-doctor support
+- Distress alerts
+
+---
+
+## 9. Project Structure
+
+```
+e:\AsapStudio\AiAvatar\
+├── backend/
+│   ├── app/
+│   │   ├── main.py                 # FastAPI app entry point
+│   │   ├── config.py               # Environment config
+│   │   ├── database.py             # Database connection
+│   │   ├── models/                 # SQLAlchemy models
+│   │   │   ├── session.py
+│   │   │   ├── script.py
+│   │   │   └── patient.py
+│   │   ├── routers/                # API endpoints
+│   │   │   ├── sessions.py
+│   │   │   ├── scripts.py
+│   │   │   └── doctor.py
+│   │   ├── services/               # Business logic
+│   │   │   ├── session_controller.py   # LangChain session brain
+│   │   │   ├── sentiment.py           # Sentiment analysis
+│   │   │   └── script_manager.py      # Script CRUD
+│   │   └── schemas/                # Pydantic models
+│   │       ├── session.py
+│   │       └── script.py
+│   ├── pipeline/
+│   │   ├── bot.py                  # Pipecat pipeline definition
+│   │   ├── session_processor.py    # Custom Pipecat processor (LangChain bridge)
+│   │   └── config.py               # Pipeline config
+│   ├── alembic/                    # Database migrations
+│   ├── requirements.txt
+│   └── .env
+├── frontend/
+│   ├── app/                        # Next.js app router
+│   ├── components/
+│   ├── lib/
+│   └── package.json
+└── docker-compose.yml              # PostgreSQL + Backend + Frontend
+```
+
+---
+
+## 10. Risks & Mitigations
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Simli latency spikes | User experience degrades | Implement idle avatar animation, pre-buffer first question |
+| LLM hallucinates / gives advice | Violates core requirement | Strict system prompt + output validation + fallback responses |
+| User becomes distressed | Safety concern | Sentiment monitoring + emergency script + session recording |
+| Deepgram misses words | Wrong LLM decisions | Use interim + final transcripts, confidence threshold |
+| WebRTC connectivity issues | Session drops | Auto-reconnect logic, session state persistence |
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> **TTS Service Choice**: Simli does NOT provide TTS. We need a separate service:
+> - **ElevenLabs** — Best voice quality (~$0.30/1000 chars), slightly higher latency
+> - **Cartesia** — Lower latency (~200ms), good quality, better for real-time
+> 
+> **Which do you prefer?** For MVP with low-latency focus, I recommend **Cartesia**.
+
+> [!IMPORTANT]  
+> **Pipecat vs Custom Pipeline**: I strongly recommend using **Pipecat** as the real-time pipeline framework (instead of writing custom WebSocket/WebRTC code from scratch). It handles VAD, streaming, and Simli integration out of the box. Your FastAPI backend would still exist for REST APIs, database, and business logic — but the real-time audio/video flow goes through Pipecat. **Are you comfortable with adding Pipecat to the stack?**
+
+> [!WARNING]
+> **Hosting Consideration**: Pipecat requires a server that can maintain WebRTC connections (not serverless). You'll need a persistent server (VM, container) for the Pipecat pipeline. This affects deployment architecture.
