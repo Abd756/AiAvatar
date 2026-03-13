@@ -17,11 +17,17 @@ class FirebaseManager:
             import json
             
             encoded_key = os.getenv("FIREBASE_SERVICE_KEY_BASE64")
+            json_key = os.getenv("FIREBASE_SERVICE_KEY_JSON")
+            
             if encoded_key:
                 decoded_key = base64.b64decode(encoded_key).decode("utf-8")
                 key_dict = json.loads(decoded_key)
                 cred = credentials.Certificate(key_dict)
                 print("✅ Firebase initialized using base64 environment variable.")
+            elif json_key:
+                key_dict = json.loads(json_key)
+                cred = credentials.Certificate(key_dict)
+                print("✅ Firebase initialized using raw JSON environment variable.")
             else:
                 # Fallback to local file
                 key_path = "firebase_service_key.json"
